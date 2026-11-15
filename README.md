@@ -312,6 +312,7 @@ battery is in the **[power library](https://github.com/chipguyhere/JC8012P4A1C_p
 |---|---|
 | [README-terminal.md](README-terminal.md) | Anyone who wants a scrolling text console instead of LVGL — including in larger text. |
 | [README-raster.md](README-raster.md) | Developers drawing part of the screen themselves, in step with the panel: the API, the time each chunk has, and the rules. |
+| [README-beam.md](README-beam.md) | `beam_race`, an independent whole-screen take on racing the beam, its two examples (BeamOniFaces, BeamSynthwaveClock), and what building it taught us about the hardware. |
 | [README-engineering.md](README-engineering.md) | Engineers: the MIPI-DSI bring-up, the panel-reset and retry strategy, the PPA rotation pipeline and its memory budget, the DMA scan list and the 2560-block test, how the terminal and the raster band work inside, the touch driver and its filtering, the backlight circuit. |
 | [board library README](https://github.com/chipguyhere/JC8012P4A1C_board/blob/main/README.md) | What else is on the board, and the I²C bus touch shares. |
 | [board README-board.md](https://github.com/chipguyhere/JC8012P4A1C_board/blob/main/README-board.md) | Developers: pin map, free pins, headers, USB ports. |
