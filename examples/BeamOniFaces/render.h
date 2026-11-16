@@ -5,6 +5,8 @@ bool render_init();      // sprites, background, band buffers
 bool render_start();     // bring up the panel and start racing the beam
 
 void render_set_params(int faces, float speed, bool see_through);
+void render_set_pie(bool on);   // PIE (SIMD) strip paths; on by default if the self-test passes
+bool render_pie();
 
 struct RenderStats {
     float fps;            // frames scanned out per second
@@ -12,6 +14,9 @@ struct RenderStats {
     float strip_max_us;
     float budget_us;      // per-strip budget with both cores
     float copy_avg_us;    // LVGL band copy share of each strip
+    float bg_avg_us;      // background fill share
+    float face_avg_us;    // face drawing share
+    float px_avg;         // face pixels covered per strip
     float flips;          // LVGL band flips per second
     uint32_t late, skipped, naps, underruns;   // totals
 };

@@ -10,11 +10,17 @@
 #include "freertos/task.h"
 #include "beam_race.h"
 
-#define RING_SLOTS 8      // 80 strips / 8 -> 10 equal DMA blocks (the bridge needs equal blocks)
+// 80 strips / 8 -> 10 equal DMA blocks (the bridge needs equal blocks). In PSRAM, keep
+// it at 8: 205 KB stays in the P4's 256 KB L2 cache. 16 slots (409 KB) didn't, every
+// strip had to be fetched back from PSRAM before it was drawn, and strips went from
+// ~290 to ~495 us (2026-11-15).
+#define RING_SLOTS 8
 
 static BeamRaceConfig s_cfg;
 static uint16_t *s_ring;
 static TaskHandle_t s_task[2];
+static TaskHandle_t s_frame_task;           // sets up frame F+1 while frame F scans out
+static volatile int32_t s_frame_req = -1;
 static int64_t s_next_job;
 static gptimer_handle_t s_timer;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -22,7 +28,7 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile int32_t s_frame_done = -1;
 static int32_t s_frame_claim = -1;
 
-struct CoreStats { volatile uint32_t n, cyc_sum, cyc_max; };
+struct CoreStats { volatile uint32_t n, cyc_max; volatile uint64_t cyc_sum; };   // 64-bit: 10 s of strips overflow 32
 static CoreStats s_cs[2];
 static volatile uint32_t s_late, s_skipped, s_naps;
 static volatile uint32_t s_frame_cyc_max;    // longest on_frame, in cycles
@@ -51,7 +57,19 @@ static void ensure_frame(int32_t F) {
         if (c > s_frame_cyc_max) s_frame_cyc_max = c;
         s_frame_done = F;
     } else {
-        while (s_frame_done < F) {}
+        // the frame task (lower priority, maybe on this core) is on it: block so it can run
+        while (s_frame_done < F) vTaskDelay(1);
+    }
+}
+
+// Per-frame setup off the renderers' critical path: run inline, a long on_frame
+// stopped one core drawing for its whole length and strips went late (a 2 ms setup
+// cost several strips a frame). This task does it in the renderers' idle time.
+static void frame_task(void *) {
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        int32_t F = s_frame_req;
+        if (F >= 0) ensure_frame(F);
     }
 }
 
@@ -109,20 +127,23 @@ static void race_task(void *arg) {
         // frame's first strip, it stalled both cores right where the frame starts
         // (the right edge in landscape) and those strips came out late. Safe: every
         // strip of frame F-1, whose state buffer it reuses, is finished by now.
-        if (k == BEAM_STRIPS / 2) ensure_frame(F + 1);
+        if (k == BEAM_STRIPS / 2 && s_frame_req < F + 1) {
+            s_frame_req = F + 1;
+            xTaskNotifyGive(s_frame_task);
+        }
     }
 }
 
-bool beam_race_reserve() {
+bool beam_race_reserve(bool internal) {
     if (s_ring) return true;
     size_t ring_bytes = (size_t)RING_SLOTS * BEAM_STRIP_BYTES;
-    s_ring = (uint16_t *)heap_caps_aligned_calloc(128, 1, ring_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (internal) s_ring = (uint16_t *)heap_caps_aligned_calloc(128, 1, ring_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
     bool sram = s_ring != nullptr;
     if (!s_ring) s_ring = (uint16_t *)heap_caps_aligned_calloc(128, 1, ring_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
     if (!s_ring) return false;
     esp_cache_msync(s_ring, ring_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     printf("[beam] strip ring: %u bytes in %s%s\n", (unsigned)ring_bytes, sram ? "internal RAM" : "PSRAM",
-           sram ? "" : " (SLOW: call beam_race_reserve() before other big internal allocations)");
+           sram || !internal ? "" : " (SLOW: call beam_race_reserve() before other big internal allocations)");
     return true;
 }
 
@@ -137,8 +158,17 @@ bool beam_race_begin(const BeamRaceConfig &cfg) {
 
     while (beam_frame_count() < 2) delay(5);
     s_next_job = beam_cur_strip() + 1;
-    xTaskCreatePinnedToCore(race_task, "strip0", 6144, (void *)0, configMAX_PRIORITIES - 3, &s_task[0], 0);
-    xTaskCreatePinnedToCore(race_task, "strip1", 6144, (void *)1, configMAX_PRIORITIES - 3, &s_task[1], 1);
+    // Priority 24, above the Wi-Fi link's SDIO/RPC tasks (unpinned, 23). Below them,
+    // every Wi-Fi burst preempted a renderer mid-strip; level with them, time slicing
+    // still handed them whole ticks. Above, Wi-Fi runs whenever a renderer is waiting
+    // for the beam (each core idles about a third of the time), and the overload nap
+    // still guarantees it a tick every 100 ms.
+    // One below the renderers, on core 1: it runs whenever that core's renderer waits
+    // for the beam and never preempts one mid-strip (at equal priority, time slicing
+    // did, for whole ticks). A renderer that needs the frame before it's ready blocks.
+    xTaskCreatePinnedToCore(frame_task, "frame", 6144, NULL, configMAX_PRIORITIES - 2, &s_frame_task, 1);
+    xTaskCreatePinnedToCore(race_task, "strip0", 6144, (void *)0, configMAX_PRIORITIES - 1, &s_task[0], 0);
+    xTaskCreatePinnedToCore(race_task, "strip1", 6144, (void *)1, configMAX_PRIORITIES - 1, &s_task[1], 1);
 
     gptimer_config_t tc = { .clk_src = GPTIMER_CLK_SRC_DEFAULT, .direction = GPTIMER_COUNT_UP, .resolution_hz = 1000000 };
     gptimer_new_timer(&tc, &s_timer);
@@ -161,14 +191,15 @@ void beam_race_stats(BeamRaceStats *o) {
     o->fps = last_ms ? (frames - last_frames) * 1000.0f / (now - last_ms) : 0;
     last_ms = now; last_frames = frames;
 
-    uint32_t n = 0, sum = 0, mx = 0;
+    uint32_t n = 0, mx = 0;
+    uint64_t sum = 0;
     for (int c = 0; c < 2; c++) {
         n += s_cs[c].n; sum += s_cs[c].cyc_sum;
         if (s_cs[c].cyc_max > mx) mx = s_cs[c].cyc_max;
         s_cs[c].n = s_cs[c].cyc_sum = s_cs[c].cyc_max = 0;
     }
     float mhz = getCpuFrequencyMhz();
-    o->strip_avg_us = n ? sum / mhz / n : 0;
+    o->strip_avg_us = n ? (float)sum / mhz / n : 0;
     o->strip_max_us = mx / mhz;
     o->budget_us = 2 * FRAME_DT / BEAM_STRIPS * 1e6f;
     o->late = s_late;

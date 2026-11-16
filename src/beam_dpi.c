@@ -19,6 +19,7 @@
 #include "esp_timer.h"
 #include <stdio.h>
 #include "esp_private/dw_gdma.h"
+#include "hal/dw_gdma_ll.h"
 #include "esp_private/periph_ctrl.h"
 #include "esp_private/esp_clk_tree_common.h"
 #include "hal/color_hal.h"
@@ -70,6 +71,7 @@ static uint32_t s_lli_addr[BEAM_MAX_BLOCKS];
 static volatile uint32_t s_frame;       // frame the DMA is currently reading
 static volatile uint32_t s_seq;         // odd while the frame-done ISR is mid-restart
 static volatile uint32_t s_underruns;
+static const uint8_t *volatile s_pending_base;   // beam_dpi_set_base(): applied at the next restart
 
 // Whole frame read: count it and restart the chain for the next frame. The DMA
 // marks items consumed as it goes, so re-arm every item's markers first (Mike's
@@ -79,6 +81,15 @@ IRAM_ATTR static bool dma_frame_done(dw_gdma_channel_handle_t chan, const dw_gdm
     // Readers (beam_cur_strip) retry while s_seq is odd, so nobody sees the new
     // frame number paired with the old frame's DMA registers.
     s_seq++;
+    const uint8_t *nb = s_pending_base;
+    if (nb) {                              // every block now reads from the new framebuffer
+        s_pending_base = NULL;
+        for (int j = 0; j < s_nblocks; j++) {
+            const uint8_t *src = nb + (size_t)s_blocks[j].first_strip * BEAM_STRIP_BYTES;
+            dw_gdma_ll_lli_set_src_addr(dw_gdma_link_list_get_item(s_list, j), (uint32_t)src);
+            s_blocks[j].src = src;
+        }
+    }
     for (int j = 0; j < s_nblocks; j++) {
         dw_gdma_lli_set_block_markers(dw_gdma_link_list_get_item(s_list, j),
                                       (dw_gdma_block_markers_t){ .is_valid = true, .is_last = (j == s_nblocks - 1) });
@@ -260,6 +271,11 @@ esp_err_t beam_dpi_start(void)
     vTaskDelay(pdMS_TO_TICKS(20));
     gpio_set_level(PIN_BACKLIGHT, 1);
     return ESP_OK;
+}
+
+void beam_dpi_set_base(const void *base)
+{
+    s_pending_base = (const uint8_t *)base;
 }
 
 IRAM_ATTR int64_t beam_cur_strip(void)

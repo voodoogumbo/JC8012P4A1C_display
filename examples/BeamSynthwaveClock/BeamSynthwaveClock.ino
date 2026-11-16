@@ -7,9 +7,15 @@
 // time into a canvas once a minute, as neon 7-segment digits, and the scene
 // blends that in.
 //
-// Tap the screen to cycle the weather (clear, rain, snow, embers).
-// Serial0 (115200): "w0".."w3" sets the weather, "h1234" sets the time to 12:34.
-// The clock starts at the build time; there's no network in this example.
+// The weather plays out in the scene, in chunky 8-bit pixels: rain that splashes on
+// the grid (heavier when pouring), storms with forked lightning, snow, fog banks, or
+// clear skies with shooting stars. The digits take the weather's colours. Night
+// mode sets the sun and dims everything.
+//
+// Tap the screen to cycle the weather (clear, rain, pouring, storm, snow, fog).
+// Serial0 (115200): "w clear|rain|pour|storm|snow|fog", "night on|off", "shoot",
+// "h1234" sets the time to 12:34. The clock starts at the build time; there's no
+// network in this example (a networked version runs a kitchen clock).
 
 #include <Arduino.h>
 #include "lvgl.h"
@@ -28,7 +34,22 @@ static uint16_t *canvas_buf;
 static int canvas_stride;           // pixels
 static int32_t clock_offset;        // seconds added to the build time
 
-static const char *WEATHER_NAMES[] = { "clear", "rain", "snow", "embers" };
+// The tap / serial weather cycle: scene weather, heavy, storm
+struct Look { const char *name; int w; bool heavy, storm; };
+static const Look LOOKS[] = {
+    { "clear", WEATHER_CLEAR, false, false }, { "rain", WEATHER_RAIN, false, false },
+    { "pour", WEATHER_RAIN, true, false },    { "storm", WEATHER_RAIN, true, true },
+    { "snow", WEATHER_SNOW, false, false },   { "fog", WEATHER_FOG, false, false },
+};
+static const int NLOOKS = sizeof LOOKS / sizeof LOOKS[0];
+static int s_look = 0;
+static bool s_night = false;
+
+static void set_look(int i) {
+    s_look = ((i % NLOOKS) + NLOOKS) % NLOOKS;
+    scene_set_weather(LOOKS[s_look].w, LOOKS[s_look].heavy, LOOKS[s_look].storm);
+    Serial0.printf("[synth] weather: %s\n", LOOKS[s_look].name);
+}
 
 // ---------------------------------------------------------------- 7-segment digits
 
@@ -113,10 +134,15 @@ static void serial_commands() {
         if (ch != '\n' && ch != '\r') { if (len < 15) line[len++] = ch; continue; }
         line[len] = 0;
         char *c = line;
-        while (*c && !strchr("wh", *c)) c++;
-        if (*c == 'w') {
-            scene_set_weather(atoi(c + 1));
-            Serial0.printf("[synth] weather: %s\n", WEATHER_NAMES[scene_weather()]);
+        while (*c && !strchr("wnsh", *c)) c++;
+        if (!strncmp(c, "w ", 2)) {
+            for (int i = 0; i < NLOOKS; i++) if (!strcmp(c + 2, LOOKS[i].name)) set_look(i);
+        } else if (!strncmp(c, "night ", 6)) {
+            s_night = !strcmp(c + 6, "on");
+            scene_set_night(s_night);
+            Serial0.printf("[synth] night %s\n", s_night ? "on" : "off");
+        } else if (!strcmp(c, "shoot")) {
+            scene_shoot();
         } else if (*c == 'h' && strlen(c) >= 4) {
             int v = atoi(c + 1), hh = v / 100, mm = v % 100;
             uint32_t want = hh * 3600 + mm * 60;
@@ -168,10 +194,7 @@ void loop() {
         last_touch = millis();
         uint16_t tx, ty;
         bool down = touch.getTouch(&tx, &ty);
-        if (down && !was_down) {
-            scene_set_weather(scene_weather() + 1);
-            Serial0.printf("[synth] weather: %s\n", WEATHER_NAMES[scene_weather()]);
-        }
+        if (down && !was_down) set_look(s_look + 1);
         was_down = down;
     }
 
@@ -191,7 +214,8 @@ void loop() {
         beam_race_stats(&s);
         Serial0.printf("[synth] %.1f fps | strip %.0f of %.0f us (worst %.0f) | frame setup %.0f us | late %lu skipped %lu naps %lu underruns %lu | %s\n",
                        s.fps, s.strip_avg_us, s.budget_us, s.strip_max_us, s.frame_max_us, (unsigned long)s.late,
-                       (unsigned long)s.skipped, (unsigned long)s.naps, (unsigned long)s.underruns, WEATHER_NAMES[scene_weather()]);
+                       (unsigned long)s.skipped, (unsigned long)s.naps, (unsigned long)s.underruns, LOOKS[s_look].name);
+        scene_prof_print();
     }
     delay(10);
 }

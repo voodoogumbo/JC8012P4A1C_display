@@ -36,6 +36,11 @@ esp_err_t beam_dpi_init(const beam_block_t *blocks, int num_blocks);
 // Send the JD9365 init sequence, start the DMA and video mode, light the backlight.
 esp_err_t beam_dpi_start(void);
 
+// For a layout where every block reads one contiguous framebuffer: from the next
+// frame on, read it from base instead (block j at base + first_strip * STRIP_BYTES).
+// Applied when the frame in progress finishes, so the flip never tears.
+void beam_dpi_set_base(const void *base);
+
 // Absolute index (frame * 80 + strip) of the strip the DMA is reading right now.
 // Strips below this have been fully read and their memory may be reused.
 int64_t beam_cur_strip(void);

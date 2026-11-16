@@ -4,9 +4,10 @@
 // 16-column slice is drawn by the CPU just before the display DMA sends it
 // (beam_race). The bottom band (y 624..799) is a normal LVGL screen whose pixels
 // get copied into each slice on the way out. LVGL only knows about two sliders,
-// a switch and some text. Up to 250 faces: horned skulls and oni.
+// a switch and some text. Up to 1000 faces: horned skulls and oni.
 //
-// Serial0 (115200): "n200" sets the face count, "s3.5" the speed, "t" toggles see-through.
+// Serial0 (115200): "n200" sets the face count, "s3.5" the speed, "t" toggles see-through,
+// "p" switches between the PIE and plain C strip code.
 
 #include <Arduino.h>
 #include "lvgl.h"
@@ -104,11 +105,11 @@ static void update_stats(lv_timer_t *t) {
     char buf[240];
     snprintf(buf, sizeof buf,
              "%.1f FPS (panel 52.0 Hz) | LVGL %.0f flips/s\n"
-             "strip %.0f of %.0f us (worst %.0f) | band copy %.0f us\n"
-             "late %lu | skipped %lu | naps %lu | underruns %lu",
-             s.fps, s.flips, s.strip_avg_us, s.budget_us, s.strip_max_us, s.copy_avg_us,
+             "strip %.0f of %.0f us (worst %.0f) | band %.0f bg %.0f faces %.0f us, %.0f px\n"
+             "late %lu | skipped %lu | naps %lu | underruns %lu | %s",
+             s.fps, s.flips, s.strip_avg_us, s.budget_us, s.strip_max_us, s.copy_avg_us, s.bg_avg_us, s.face_avg_us, s.px_avg,
              (unsigned long)s.late, (unsigned long)s.skipped, (unsigned long)s.naps,
-             (unsigned long)s.underruns);
+             (unsigned long)s.underruns, render_pie() ? "PIE" : "C");
     lv_label_set_text(lbl_stats, buf);
     Serial0.println(buf);
 }
@@ -214,7 +215,8 @@ void setup() {
                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
-// Serial test hooks: "n200" sets the face count, "s3.5" the speed, "t" toggles see-through.
+// Serial test hooks: "n200" sets the face count, "s3.5" the speed, "t" toggles see-through,
+// "p" PIE on/off.
 static void serial_commands() {
     static char line[16];
     static int len = 0;
@@ -223,11 +225,12 @@ static void serial_commands() {
         if (ch != '\n' && ch != '\r') { if (len < 15) line[len++] = ch; continue; }
         line[len] = 0;
         char *cmd = line;
-        while (*cmd && !strchr("nst", *cmd)) cmd++;    // skip any line noise
+        while (*cmd && !strchr("nstp", *cmd)) cmd++;    // skip any line noise
         memmove(line, cmd, strlen(cmd) + 1);
         if (line[0]) Serial0.printf("[cmd] %s\n", line);
         if (line[0] == 'n') lv_slider_set_value(sld_faces, atoi(line + 1), LV_ANIM_OFF);
         else if (line[0] == 's') lv_slider_set_value(sld_speed, (int)(atof(line + 1) * 100), LV_ANIM_OFF);
+        else if (line[0] == 'p') { render_set_pie(!render_pie()); Serial0.printf("[cmd] PIE %s\n", render_pie() ? "on" : "off"); }
         else if (line[0] == 't') {
             if (lv_obj_has_state(sw_see, LV_STATE_CHECKED)) lv_obj_remove_state(sw_see, LV_STATE_CHECKED);
             else lv_obj_add_state(sw_see, LV_STATE_CHECKED);

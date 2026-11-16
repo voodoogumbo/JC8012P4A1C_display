@@ -15,4 +15,4 @@
                                       // (the DSI bridge assumes every block is the same size)
 #define FACE_D       48
 #define FACE_R       (FACE_D / 2)
-#define MAX_FACES    250              // 300 still fits (419 of 481 us); 400 does not, yet
+#define MAX_FACES    1000             // see-through with PIE: 408 of 481 us per strip
